@@ -1,190 +1,109 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+/**
+ * 报价核价与改价留痕台 —— 界面装配层
+ * 规则见 rules/，存储见 storage/，编排见 stores/，本文件只做组装与交互。
+ */
+import { computed, ref } from "vue";
+import { ROUTES, RULES_VERSION, VOLUME_WEIGHT_FACTOR } from "./rules/pricing";
+import { useQuoteStore } from "./stores/quoteStore";
+import type { LatestView, QuoteInput, QuoteRecord } from "./models/quote";
+import { money } from "./utils/format";
+import QuoteForm from "./components/QuoteForm.vue";
+import QuoteList from "./components/QuoteList.vue";
+import RepriceDialog from "./components/RepriceDialog.vue";
+import VersionDrawer from "./components/VersionDrawer.vue";
 
-type Field = {
-  key: string;
-  label: string;
-  type?: "number" | "date" | "select";
-  options?: readonly string[];
-};
+const store = useQuoteStore();
 
-type RecordItem = {
-  id: string;
-  status: string;
-  notes: string;
-  createdAt: string;
-  [key: string]: string | number;
-};
+// 左栏模式：新建 / 编辑待核价草稿
+const editingId = ref<string | null>(null);
+const editingInitial = ref<QuoteInput | null>(null);
+const formKey = ref(0);
 
-const project = {
-  "number": 13,
-  "folder": "hxwl/frontend/hxwlfront-13",
-  "framework": "vue",
-  "title": "物流费用试算器",
-  "subtitle": "根据线路、重量、体积和服务类型生成本地报价记录。",
-  "industry": "物流",
-  "stack": [
-    "Vue3",
-    "Vite",
-    "TypeScript",
-    "Pinia",
-    "Element Plus"
-  ],
-  "storageKey": "hxwlfront-13-freight",
-  "formTitle": "新增报价",
-  "primaryAction": "计算并保存",
-  "entityLabel": "报价",
-  "statuses": [
-    "草稿",
-    "已报价",
-    "已复制"
-  ],
-  "filters": [
-    "全部服务",
-    "标准达",
-    "次日达",
-    "冷链"
-  ],
-  "fields": [
-    {
-      "key": "customer",
-      "label": "客户名称"
-    },
-    {
-      "key": "route",
-      "label": "运输线路"
-    },
-    {
-      "key": "weight",
-      "label": "重量kg",
-      "type": "number"
-    },
-    {
-      "key": "service",
-      "label": "服务类型",
-      "type": "select",
-      "options": [
-        "标准达",
-        "次日达",
-        "冷链"
-      ]
-    }
-  ],
-  "records": [
-    {
-      "customer": "海沃商贸",
-      "route": "上海-南京",
-      "weight": 180,
-      "service": "标准达",
-      "status": "已报价",
-      "notes": "预估费用1260元"
-    },
-    {
-      "customer": "云仓食品",
-      "route": "杭州-合肥",
-      "weight": 95,
-      "service": "冷链",
-      "status": "草稿",
-      "notes": "待确认温区"
-    }
-  ],
-  "metricLabels": [
-    "报价数",
-    "已报价",
-    "平均重量"
-  ]
-} as const;
+// 弹窗状态
+const repriceTarget = ref<LatestView | null>(null);
+const historyRecord = ref<QuoteRecord | null>(null);
 
-const fields = project.fields as readonly Field[];
-const statuses = [...project.statuses];
+const metrics = computed(() => [
+  { label: "报价单数", value: store.stats.total },
+  { label: "待核价", value: store.stats.drafts },
+  { label: "已核价/改价", value: store.stats.priced },
+  { label: "改价留痕次数", value: store.stats.revisions },
+  { label: "最新口径总金额", value: money(store.stats.amount) }
+]);
 
-function createBlank() {
-  return Object.fromEntries(fields.map((field) => [field.key, field.type === "number" ? 0 : ""]));
+const maxChart = computed(() => Math.max(1, ...store.statusCounts.map((row) => row.value)));
+
+const formTitle = computed(() => (editingId.value ? "编辑待核价草稿" : "新增报价试算"));
+
+function resetForm() {
+  editingId.value = null;
+  editingInitial.value = null;
+  formKey.value += 1;
 }
 
-function loadRecords(): RecordItem[] {
-  const raw = localStorage.getItem(project.storageKey);
-  if (!raw) {
-    return project.records.map((record, index) => ({
-      ...record,
-      id: `seed-${index + 1}`,
-      createdAt: new Date(Date.now() - index * 86400000).toISOString()
-    })) as RecordItem[];
+function onSubmitDraft(input: QuoteInput) {
+  if (editingId.value) {
+    store.saveDraft(input, editingId.value);
+  } else {
+    store.saveDraft(input);
   }
-  try {
-    return JSON.parse(raw) as RecordItem[];
-  } catch {
-    return [];
+  resetForm();
+}
+
+function onSubmitApprove(input: QuoteInput, note: string) {
+  if (editingId.value) {
+    // 先更新草稿，再核价冻结为 v1
+    const record = store.saveDraft(input, editingId.value);
+    store.approve(record.id, note);
+  } else {
+    // 直接核价：先建草稿再立即冻结，保证所有 v1 都走同一条核价路径
+    const record = store.saveDraft(input);
+    store.approve(record.id, note);
+  }
+  resetForm();
+}
+
+function onEditDraft(view: LatestView) {
+  editingId.value = view.record.id;
+  editingInitial.value = { ...view.input };
+  formKey.value += 1;
+}
+
+function onApprove(view: LatestView) {
+  if (view.record.status === "待核价") {
+    const note = window.prompt("核价说明（可留空）", view.input.remark ?? "") ?? "";
+    store.approve(view.record.id, note);
   }
 }
 
-const records = ref<RecordItem[]>(loadRecords());
-const form = reactive<Record<string, string | number>>(createBlank());
-const note = ref("");
-const filter = ref(project.filters[0]);
-
-const filteredRecords = computed(() => {
-  if (filter.value.startsWith("全部")) return records.value;
-  return records.value.filter((record) => Object.values(record).includes(filter.value));
-});
-
-const metrics = computed(() => {
-  const total = records.value.length;
-  const second = records.value.filter((record) => record.status === statuses[1]).length;
-  const third = records.value.filter((record) => record.status === statuses[2]).length;
-  const numberValues = records.value.flatMap((record) =>
-    fields.filter((field) => field.type === "number").map((field) => Number(record[field.key] || 0))
-  );
-  const sum = numberValues.reduce((acc, value) => acc + value, 0);
-  return [total, second || sum, third || Math.round(sum / Math.max(total, 1))];
-});
-
-const chartRows = computed(() => statuses.map((status) => ({
-  status,
-  value: records.value.filter((record) => record.status === status).length
-})));
-
-const maxChart = computed(() => Math.max(1, ...chartRows.value.map((row) => row.value)));
-
-function persist() {
-  localStorage.setItem(project.storageKey, JSON.stringify(records.value));
+function onRepriceConfirm(id: string, input: QuoteInput, reason: string) {
+  store.reprice(id, input, reason);
+  repriceTarget.value = null;
 }
 
-function nextStatus(status: string) {
-  const index = statuses.indexOf(status);
-  return statuses[(index + 1) % statuses.length];
+function onClose(view: LatestView) {
+  if (window.confirm(`确认关闭「${view.input.customer}」的报价单？关闭后不可继续改价。`)) {
+    store.close(view.record.id);
+  }
 }
 
-function primaryText(record: RecordItem) {
-  const first = fields[0];
-  const second = fields[1];
-  return [record[first.key], record[second.key]].filter(Boolean).join(" / ") || project.entityLabel;
+function onRemove(view: LatestView) {
+  if (window.confirm(`确认删除「${view.input.customer}」整笔报价及其版本链？此操作不可恢复。`)) {
+    store.remove(view.record.id);
+    if (editingId.value === view.record.id) resetForm();
+  }
 }
 
-function submit() {
-  records.value = [
-    {
-      ...form,
-      id: crypto.randomUUID(),
-      status: statuses[0],
-      notes: note.value || "暂无备注",
-      createdAt: new Date().toISOString()
-    } as RecordItem,
-    ...records.value
-  ];
-  Object.assign(form, createBlank());
-  note.value = "";
-  persist();
+function openHistory(view: LatestView) {
+  historyRecord.value = view.record;
 }
 
-function flow(record: RecordItem) {
-  record.status = nextStatus(record.status);
-  persist();
-}
-
-function remove(id: string) {
-  records.value = records.value.filter((record) => record.id !== id);
-  persist();
+function resetDemo() {
+  if (window.confirm("确认清空当前数据并恢复演示报价？")) {
+    store.resetAll();
+    resetForm();
+  }
 }
 </script>
 
@@ -193,78 +112,218 @@ function remove(id: string) {
     <div class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">{{ project.industry }}行业前端最小闭环</p>
-          <h1>{{ project.title }}</h1>
-          <p class="subtitle">{{ project.subtitle }}</p>
+          <p class="eyebrow">物流报价 · 核价冻结 · 改价留痕</p>
+          <h1>报价核价与改价留痕台</h1>
+          <p class="subtitle">
+            按线路、实重、体积与重量档位计价：体积重 {{ VOLUME_WEIGHT_FACTOR }}kg/m³，计费重取实重与体积重较大者、
+            不足起计重量按起计重量；折扣只作用重量费，燃油附加费最后加。核价后冻结费用明细，改价须填原因并生成新版本。
+          </p>
         </div>
         <div class="stack">
-          <span v-for="item in project.stack" :key="item" class="tag">{{ item }}</span>
+          <span class="tag">Vue3 + Pinia</span>
+          <span class="tag">规则/存储/界面分离</span>
+          <span class="tag">规则版本 {{ RULES_VERSION }}</span>
         </div>
       </header>
 
       <section class="metrics">
-        <article v-for="(label, index) in project.metricLabels" :key="label" class="metric">
-          <span>{{ label }}</span>
-          <strong>{{ metrics[index] }}</strong>
+        <article v-for="item in metrics" :key="item.label" class="metric">
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
         </article>
       </section>
 
       <section class="workspace">
-        <form class="panel" @submit.prevent="submit">
-          <h2>{{ project.formTitle }}</h2>
-          <div class="form-grid">
-            <label v-for="field in fields" :key="field.key">
-              {{ field.label }}
-              <select v-if="field.type === 'select'" v-model="form[field.key]" required>
-                <option value="">请选择</option>
-                <option v-for="option in field.options" :key="option">{{ option }}</option>
-              </select>
-              <input v-else v-model="form[field.key]" :type="field.type || 'text'" required />
-            </label>
-            <label>
-              备注
-              <textarea v-model="note" placeholder="填写处理说明或现场备注" />
-            </label>
-            <button type="submit">{{ project.primaryAction }}</button>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>{{ formTitle }}</h2>
+            <button v-if="editingId" type="button" class="link-btn" @click="resetForm">＋ 新建报价</button>
           </div>
-        </form>
+
+          <div class="operator-row">
+            <label>
+              操作人
+              <input
+                :value="store.prefs.operator"
+                placeholder="记录到版本上"
+                @input="store.setFilter({ operator: ($event.target as HTMLInputElement).value })"
+              />
+            </label>
+          </div>
+
+          <QuoteForm
+            :key="formKey"
+            :initial="editingInitial"
+            @submit-draft="onSubmitDraft"
+            @submit-approve="onSubmitApprove"
+            @cancel="resetForm"
+          />
+        </div>
 
         <section class="list-panel">
           <div class="toolbar">
-            <h2>{{ project.entityLabel }}列表</h2>
-            <select v-model="filter">
-              <option v-for="item in project.filters" :key="item">{{ item }}</option>
-            </select>
+            <h2>报价列表 <em>（读取最新版本）</em></h2>
+            <button type="button" class="secondary small" @click="resetDemo">恢复演示数据</button>
           </div>
 
-          <div class="record-grid">
-            <div v-if="filteredRecords.length === 0" class="empty">暂无匹配数据</div>
-            <article v-for="record in filteredRecords" :key="record.id" class="record">
-              <div class="record-head">
-                <p class="record-title">{{ primaryText(record) }}</p>
-                <span class="status">{{ record.status }}</span>
-              </div>
-              <div class="details">
-                <span v-for="field in fields" :key="field.key">{{ field.label }}: {{ record[field.key] }}</span>
-              </div>
-              <p class="note">{{ record.notes }}</p>
-              <div class="actions">
-                <button type="button" @click="flow(record)">流转状态</button>
-                <button class="secondary" type="button" @click="navigator.clipboard?.writeText(primaryText(record))">复制摘要</button>
-                <button class="danger" type="button" @click="remove(record.id)">删除</button>
-              </div>
-            </article>
+          <div class="filters">
+            <select
+              :value="store.prefs.routeFilter"
+              @change="store.setFilter({ routeFilter: ($event.target as HTMLSelectElement).value })"
+            >
+              <option value="ALL">全部线路</option>
+              <option v-for="route in ROUTES" :key="route.code" :value="route.code">{{ route.name }}</option>
+            </select>
+
+            <select
+              :value="store.prefs.statusFilter"
+              @change="store.setFilter({ statusFilter: ($event.target as HTMLSelectElement).value })"
+            >
+              <option value="ALL">全部状态</option>
+              <option value="待核价">待核价</option>
+              <option value="已核价">已核价</option>
+              <option value="已改价">已改价</option>
+              <option value="已关闭">已关闭</option>
+            </select>
+
+            <input
+              class="keyword"
+              placeholder="搜索客户 / 备注 / 改价原因"
+              :value="store.prefs.keyword"
+              @input="store.setFilter({ keyword: ($event.target as HTMLInputElement).value })"
+            />
           </div>
+
+          <QuoteList
+            :views="store.filteredViews"
+            @edit-draft="onEditDraft"
+            @approve="onApprove"
+            @reprice="repriceTarget = $event"
+            @history="openHistory"
+            @close="onClose"
+            @remove="onRemove"
+          />
 
           <div class="mini-chart">
-            <div v-for="row in chartRows" :key="row.status" class="bar">
+            <div v-for="row in store.statusCounts" :key="row.status" class="bar">
               <span>{{ row.status }}</span>
-              <div class="bar-track"><div class="bar-fill" :style="{ width: `${(row.value / maxChart) * 100}%` }" /></div>
+              <div class="bar-track">
+                <div class="bar-fill" :style="{ width: `${(row.value / maxChart) * 100}%` }" />
+              </div>
               <strong>{{ row.value }}</strong>
             </div>
           </div>
         </section>
       </section>
     </div>
+
+    <RepriceDialog
+      :view="repriceTarget"
+      @confirm="onRepriceConfirm"
+      @close="repriceTarget = null"
+    />
+
+    <VersionDrawer
+      :record="historyRecord"
+      @close="historyRecord = null"
+    />
   </main>
 </template>
+
+<style scoped>
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.panel-head h2,
+.toolbar h2 {
+  margin: 0;
+  font-size: 19px;
+}
+
+.toolbar h2 em {
+  font-style: normal;
+  font-size: 12px;
+  color: #93a0b5;
+  font-weight: 500;
+}
+
+.link-btn {
+  background: none;
+  color: #176b87;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+
+.operator-row {
+  margin-bottom: 12px;
+}
+
+.operator-row label {
+  display: grid;
+  gap: 6px;
+  color: #445069;
+  font-size: 13px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.small {
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.4fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.mini-chart {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #eef2f7;
+}
+
+.bar {
+  display: grid;
+  grid-template-columns: 72px 1fr 36px;
+  gap: 10px;
+  align-items: center;
+  color: #536078;
+  font-size: 13px;
+}
+
+.bar-track {
+  height: 10px;
+  border-radius: 999px;
+  background: #e7edf4;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #176b87, #64b6ac);
+}
+
+@media (max-width: 860px) {
+  .filters {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

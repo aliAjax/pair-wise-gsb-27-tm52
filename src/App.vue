@@ -1,191 +1,53 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+/**
+ * 界面层壳：指标 / 筛选 / 列表均从 store 的最新版本读取；
+ * 计价规则见 src/rules，持久化见 src/storage。
+ */
+import { computed, onMounted, ref } from "vue";
+import { ROUTE_RULES } from "./rules/catalog";
+import { QUOTE_STATUSES } from "./rules/types";
+import type { Quote } from "./rules/types";
+import { useQuoteStore } from "./storage/store";
+import QuoteForm from "./ui/QuoteForm.vue";
+import QuoteDrawer from "./ui/QuoteDrawer.vue";
 
-type Field = {
-  key: string;
-  label: string;
-  type?: "number" | "date" | "select";
-  options?: readonly string[];
-};
+const store = useQuoteStore();
+onMounted(() => store.hydrate());
 
-type RecordItem = {
-  id: string;
-  status: string;
-  notes: string;
-  createdAt: string;
-  [key: string]: string | number;
-};
+const openId = ref<string | null>(null);
+const activeQuote = computed<Quote | null>(() =>
+  openId.value ? store.getQuote(openId.value) ?? null : null
+);
 
-const project = {
-  "number": 13,
-  "folder": "hxwl/frontend/hxwlfront-13",
-  "framework": "vue",
-  "title": "物流费用试算器",
-  "subtitle": "根据线路、重量、体积和服务类型生成本地报价记录。",
-  "industry": "物流",
-  "stack": [
-    "Vue3",
-    "Vite",
-    "TypeScript",
-    "Pinia",
-    "Element Plus"
-  ],
-  "storageKey": "hxwlfront-13-freight",
-  "formTitle": "新增报价",
-  "primaryAction": "计算并保存",
-  "entityLabel": "报价",
-  "statuses": [
-    "草稿",
-    "已报价",
-    "已复制"
-  ],
-  "filters": [
-    "全部服务",
-    "标准达",
-    "次日达",
-    "冷链"
-  ],
-  "fields": [
-    {
-      "key": "customer",
-      "label": "客户名称"
-    },
-    {
-      "key": "route",
-      "label": "运输线路"
-    },
-    {
-      "key": "weight",
-      "label": "重量kg",
-      "type": "number"
-    },
-    {
-      "key": "service",
-      "label": "服务类型",
-      "type": "select",
-      "options": [
-        "标准达",
-        "次日达",
-        "冷链"
-      ]
-    }
-  ],
-  "records": [
-    {
-      "customer": "海沃商贸",
-      "route": "上海-南京",
-      "weight": 180,
-      "service": "标准达",
-      "status": "已报价",
-      "notes": "预估费用1260元"
-    },
-    {
-      "customer": "云仓食品",
-      "route": "杭州-合肥",
-      "weight": 95,
-      "service": "冷链",
-      "status": "草稿",
-      "notes": "待确认温区"
-    }
-  ],
-  "metricLabels": [
-    "报价数",
-    "已报价",
-    "平均重量"
-  ]
-} as const;
-
-const fields = project.fields as readonly Field[];
-const statuses = [...project.statuses];
-
-function createBlank() {
-  return Object.fromEntries(fields.map((field) => [field.key, field.type === "number" ? 0 : ""]));
+function open(quote: Quote) {
+  openId.value = quote.id;
+}
+function close() {
+  openId.value = null;
 }
 
-function loadRecords(): RecordItem[] {
-  const raw = localStorage.getItem(project.storageKey);
-  if (!raw) {
-    return project.records.map((record, index) => ({
-      ...record,
-      id: `seed-${index + 1}`,
-      createdAt: new Date(Date.now() - index * 86400000).toISOString()
-    })) as RecordItem[];
-  }
-  try {
-    return JSON.parse(raw) as RecordItem[];
-  } catch {
-    return [];
-  }
+function money(v: number) {
+  return `¥${v.toFixed(2)}`;
+}
+function fmtDate(iso: string) {
+  return new Date(iso).toLocaleDateString("zh-CN");
+}
+function cardSummary(quote: Quote) {
+  const v = store.latestVersion(quote);
+  const f = v.fees;
+  return {
+    v,
+    billing: f.billingWeight,
+    tier: f.tierLabel,
+    total: f.total,
+    manual: f.manualAdjustment,
+    count: quote.versions.length,
+  };
 }
 
-const records = ref<RecordItem[]>(loadRecords());
-const form = reactive<Record<string, string | number>>(createBlank());
-const note = ref("");
-const filter = ref(project.filters[0]);
-
-const filteredRecords = computed(() => {
-  if (filter.value.startsWith("全部")) return records.value;
-  return records.value.filter((record) => Object.values(record).includes(filter.value));
-});
-
-const metrics = computed(() => {
-  const total = records.value.length;
-  const second = records.value.filter((record) => record.status === statuses[1]).length;
-  const third = records.value.filter((record) => record.status === statuses[2]).length;
-  const numberValues = records.value.flatMap((record) =>
-    fields.filter((field) => field.type === "number").map((field) => Number(record[field.key] || 0))
-  );
-  const sum = numberValues.reduce((acc, value) => acc + value, 0);
-  return [total, second || sum, third || Math.round(sum / Math.max(total, 1))];
-});
-
-const chartRows = computed(() => statuses.map((status) => ({
-  status,
-  value: records.value.filter((record) => record.status === status).length
-})));
-
-const maxChart = computed(() => Math.max(1, ...chartRows.value.map((row) => row.value)));
-
-function persist() {
-  localStorage.setItem(project.storageKey, JSON.stringify(records.value));
-}
-
-function nextStatus(status: string) {
-  const index = statuses.indexOf(status);
-  return statuses[(index + 1) % statuses.length];
-}
-
-function primaryText(record: RecordItem) {
-  const first = fields[0];
-  const second = fields[1];
-  return [record[first.key], record[second.key]].filter(Boolean).join(" / ") || project.entityLabel;
-}
-
-function submit() {
-  records.value = [
-    {
-      ...form,
-      id: crypto.randomUUID(),
-      status: statuses[0],
-      notes: note.value || "暂无备注",
-      createdAt: new Date().toISOString()
-    } as RecordItem,
-    ...records.value
-  ];
-  Object.assign(form, createBlank());
-  note.value = "";
-  persist();
-}
-
-function flow(record: RecordItem) {
-  record.status = nextStatus(record.status);
-  persist();
-}
-
-function remove(id: string) {
-  records.value = records.value.filter((record) => record.id !== id);
-  persist();
-}
+const maxStatusCount = computed(() =>
+  Math.max(1, ...store.statusCounts.map((r) => r.value))
+);
 </script>
 
 <template>
@@ -193,78 +55,212 @@ function remove(id: string) {
     <div class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">{{ project.industry }}行业前端最小闭环</p>
-          <h1>{{ project.title }}</h1>
-          <p class="subtitle">{{ project.subtitle }}</p>
+          <p class="eyebrow">物流核价 · 改价留痕</p>
+          <h1>报价核价与改价留痕台</h1>
+          <p class="subtitle">
+            按线路、实重、体积与重量档位计价：体积重 = 体积 × 200 kg/m³，计费重取实重/体积重较大者、
+            低于起计重量按起计重量；折扣只作用于重量费，燃油附加费最后加。核价后明细冻结，改价必须写原因并生成新版本。
+          </p>
         </div>
         <div class="stack">
-          <span v-for="item in project.stack" :key="item" class="tag">{{ item }}</span>
+          <span class="tag">规则层 pricing</span>
+          <span class="tag">存储层 repository</span>
+          <span class="tag">界面层 Vue</span>
         </div>
       </header>
 
       <section class="metrics">
-        <article v-for="(label, index) in project.metricLabels" :key="label" class="metric">
-          <span>{{ label }}</span>
-          <strong>{{ metrics[index] }}</strong>
+        <article class="metric">
+          <span>报价单数</span>
+          <strong>{{ store.metrics.total }}</strong>
+        </article>
+        <article class="metric">
+          <span>已核价 / 已报价</span>
+          <strong>{{ store.metrics.pricing }}</strong>
+        </article>
+        <article class="metric">
+          <span>累计版本数（含留痕）</span>
+          <strong>{{ store.metrics.versions }}</strong>
+        </article>
+        <article class="metric">
+          <span>在台报价金额</span>
+          <strong>{{ money(store.metrics.amount) }}</strong>
         </article>
       </section>
 
       <section class="workspace">
-        <form class="panel" @submit.prevent="submit">
-          <h2>{{ project.formTitle }}</h2>
-          <div class="form-grid">
-            <label v-for="field in fields" :key="field.key">
-              {{ field.label }}
-              <select v-if="field.type === 'select'" v-model="form[field.key]" required>
-                <option value="">请选择</option>
-                <option v-for="option in field.options" :key="option">{{ option }}</option>
-              </select>
-              <input v-else v-model="form[field.key]" :type="field.type || 'text'" required />
-            </label>
-            <label>
-              备注
-              <textarea v-model="note" placeholder="填写处理说明或现场备注" />
-            </label>
-            <button type="submit">{{ project.primaryAction }}</button>
-          </div>
-        </form>
+        <QuoteForm />
 
         <section class="list-panel">
           <div class="toolbar">
-            <h2>{{ project.entityLabel }}列表</h2>
-            <select v-model="filter">
-              <option v-for="item in project.filters" :key="item">{{ item }}</option>
-            </select>
+            <h2>报价列表</h2>
+            <div class="filters">
+              <input
+                class="kw"
+                :value="store.filters.keyword"
+                placeholder="搜客户名 / 单号"
+                @input="store.setFilters({ keyword: ($event.target as HTMLInputElement).value })"
+              />
+              <select
+                :value="store.filters.routeId"
+                @change="store.setFilters({ routeId: ($event.target as HTMLSelectElement).value })"
+              >
+                <option value="全部">全部线路</option>
+                <option v-for="r in ROUTE_RULES" :key="r.id" :value="r.id">{{ r.name }}</option>
+              </select>
+              <select
+                :value="store.filters.status"
+                @change="store.setFilters({ status: ($event.target as HTMLSelectElement).value })"
+              >
+                <option value="全部">全部状态</option>
+                <option v-for="s in QUOTE_STATUSES" :key="s" :value="s">{{ s }}</option>
+              </select>
+              <button type="button" class="secondary small" @click="store.resetFilters()">重置</button>
+            </div>
           </div>
 
           <div class="record-grid">
-            <div v-if="filteredRecords.length === 0" class="empty">暂无匹配数据</div>
-            <article v-for="record in filteredRecords" :key="record.id" class="record">
+            <div v-if="store.filteredQuotes.length === 0" class="empty">暂无匹配报价</div>
+            <article
+              v-for="quote in store.filteredQuotes"
+              :key="quote.id"
+              class="record"
+              @click="open(quote)"
+            >
               <div class="record-head">
-                <p class="record-title">{{ primaryText(record) }}</p>
-                <span class="status">{{ record.status }}</span>
+                <div>
+                  <p class="record-title">{{ quote.customer }}</p>
+                  <p class="record-sub">
+                    {{ cardSummary(quote).v.fees.routeName }} ·
+                    计费重 {{ cardSummary(quote).billing }}kg ·
+                    {{ cardSummary(quote).tier }}
+                  </p>
+                </div>
+                <span class="status" :class="`st-${quote.status}`">{{ quote.status }}</span>
               </div>
-              <div class="details">
-                <span v-for="field in fields" :key="field.key">{{ field.label }}: {{ record[field.key] }}</span>
+              <div class="record-body">
+                <div class="price">
+                  <span class="price-label">v{{ cardSummary(quote).v.version }} 合计</span>
+                  <strong>{{ money(cardSummary(quote).total) }}</strong>
+                  <em v-if="cardSummary(quote).manual" class="manual-flag">人工改价</em>
+                </div>
+                <ul class="meta">
+                  <li>版本 {{ cardSummary(quote).count }} 个 · 旧版可查</li>
+                  <li>更新于 {{ fmtDate(quote.updatedAt) }}</li>
+                </ul>
               </div>
-              <p class="note">{{ record.notes }}</p>
-              <div class="actions">
-                <button type="button" @click="flow(record)">流转状态</button>
-                <button class="secondary" type="button" @click="navigator.clipboard?.writeText(primaryText(record))">复制摘要</button>
-                <button class="danger" type="button" @click="remove(record.id)">删除</button>
+              <div class="actions" @click.stop>
+                <button
+                  v-if="quote.status === '草稿'"
+                  type="button"
+                  @click="store.submitForApproval(quote.id)"
+                >提交核价</button>
+                <button
+                  v-else-if="store.nextActions(quote.status).length"
+                  type="button"
+                  @click="store.transition(quote.id, store.nextActions(quote.status)[0])"
+                >{{ store.actionLabel(quote.status) }}</button>
+                <button class="secondary" type="button" @click="open(quote)">
+                  详情 / 改价留痕
+                </button>
+                <button class="danger ghost" type="button" @click="store.remove(quote.id)">删除</button>
               </div>
             </article>
           </div>
 
           <div class="mini-chart">
-            <div v-for="row in chartRows" :key="row.status" class="bar">
+            <div v-for="row in store.statusCounts" :key="row.status" class="bar">
               <span>{{ row.status }}</span>
-              <div class="bar-track"><div class="bar-fill" :style="{ width: `${(row.value / maxChart) * 100}%` }" /></div>
+              <div class="bar-track">
+                <div class="bar-fill" :style="{ width: `${(row.value / maxStatusCount) * 100}%` }" />
+              </div>
               <strong>{{ row.value }}</strong>
             </div>
           </div>
         </section>
       </section>
     </div>
+
+    <QuoteDrawer :quote="activeQuote" @close="close" />
   </main>
 </template>
+
+<style scoped>
+.filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.filters .kw {
+  width: 170px;
+  padding: 8px 10px;
+}
+.filters select {
+  padding: 8px 10px;
+  width: auto;
+}
+.small {
+  padding: 8px 12px;
+}
+.record {
+  cursor: pointer;
+  transition: box-shadow 0.15s;
+}
+.record:hover {
+  box-shadow: 0 4px 14px rgba(23, 32, 51, 0.08);
+}
+.record-sub {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: #8a94a8;
+}
+.record-body {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-end;
+  margin: 10px 0;
+}
+.price {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.price-label {
+  font-size: 12px;
+  color: #8a94a8;
+}
+.price strong {
+  font-size: 24px;
+  color: #176b87;
+  font-variant-numeric: tabular-nums;
+}
+.manual-flag {
+  font-style: normal;
+  font-size: 11px;
+  background: #fdf6e3;
+  color: #8a6d1d;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.meta {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  text-align: right;
+  color: #8a94a8;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.ghost {
+  background: transparent;
+  color: #c84b31;
+  border: 1px solid #ecc7be;
+}
+.st-草稿 { background: #eef2f7; color: #536078; }
+.st-待核价 { background: #fdf6e3; color: #8a6d1d; }
+.st-已核价 { background: #e8f4ef; color: #14724f; }
+.st-已报价 { background: #e6f0fb; color: #1a5fb4; }
+.st-已失效 { background: #fbeae6; color: #c84b31; }
+</style>
